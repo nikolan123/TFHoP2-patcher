@@ -1,0 +1,19 @@
+{
+  "metadata": {
+    "display_name": "Portal 2 - The Final Hours Revival Patcher",
+    "description": "Patch The Final Hours of Portal 2 to use my revival server for retired online features.",
+    "supported_platforms": {
+      "windows": "Windows 10 or later"
+    }
+  },
+  "jobs": [
+    {
+      "key": "windows-patcher",
+      "platform": "windows",
+      "arch": "x64",
+      "artifacts_glob": [
+        "artifacts/*.exe"
+      ]
+    }
+  ]
+}

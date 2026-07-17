@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import sys
 import threading
 import tkinter as tk
 import webbrowser
@@ -19,7 +20,8 @@ from patcher_engine import (
 
 
 APP_TITLE = "Portal 2 - The Final Hours Patcher"
-ASSET_DIR = Path(__file__).resolve().parent / "assets"
+APP_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+ASSET_DIR = APP_DIR / "assets"
 DEFAULT_SWF_PATHS = (
     Path(
         r"C:\Program Files (x86)\Steam\steamapps\common\The Final Hours of Portal 2"
@@ -82,6 +84,10 @@ class Patcher(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(APP_TITLE)
+        try:
+            self.iconbitmap(default=str(ASSET_DIR / "patcher.ico"))
+        except tk.TclError:
+            pass
         self.resizable(False, False)
         self.configure(bg=BG)
         self.overrideredirect(True)

@@ -1,1 +1,6 @@
 __pycache__
+build/
+dist/
+artifacts/
+*.spec
+.tekljer_action_started_at

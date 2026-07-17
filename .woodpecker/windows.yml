@@ -1,0 +1,42 @@
+when:
+  - event: push
+    branch:
+      - main
+      - master
+  - event: manual
+
+labels:
+  backend: docker
+  platform: linux/amd64
+
+steps:
+  build-windows:
+    image: ddemuro/pyinstaller:py3-win32-3.12.9-6.13.0-20250422
+    commands:
+      - date +%s > .tekljer_action_started_at
+      - >-
+        pyinstaller
+        --noconfirm
+        --clean
+        --onefile
+        --windowed
+        --icon "assets/patcher.ico"
+        --name "Portal-2-The-Final-Hours-Patcher"
+        --add-data "assets;assets"
+        patcher.py
+      - mkdir -p artifacts
+      - cp dist/Portal-2-The-Final-Hours-Patcher.exe artifacts/
+      - ls -lah artifacts
+
+  post-windows-to-tekljer:
+    image: alpine
+    depends_on:
+      - build-windows
+    environment:
+      UPLOAD_TOKEN:
+        from_secret: upload_token
+      TEKLJER_SERVER: http://tekljer:8000
+      TEKLJER_JOB: windows-patcher
+    commands:
+      - apk add --no-cache curl jq
+      - curl -fsSL "$TEKLJER_SERVER/ci/v1/upload.sh" | sh
