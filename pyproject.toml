@@ -1,7 +1,7 @@
 [project]
 name = "tfhop2-patcher"
 version = "0.1.0"
-description = "Add your description here"
+description = "Patch The Final Hours of Portal 2 to use a custom server"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = []

@@ -48,7 +48,7 @@ GREEN = "#9acb56"
 ORANGE = "#d79a45"
 BUTTON = "#364963"
 BUTTON_HOVER = "#445b7c"
-PROJECT_GITHUB = "https://github.com/nikolan123/whatever"
+PROJECT_GITHUB = "https://github.com/nikolan123/TFHoP2-patcher"
 
 
 class SteamButton(tk.Label):
@@ -419,7 +419,7 @@ class Patcher(tk.Tk):
             try:
                 result = operation()
             except Exception as exc:
-                self.after(0, lambda: self._finish_operation(None, exc))
+                self.after(0, lambda error=exc: self._finish_operation(None, error))
             else:
                 self.after(0, lambda: self._finish_operation(result, None))
 

@@ -8,7 +8,11 @@ The original ebook still works, but many of its online features disappeared as w
 
 [Download x64 for Windows](https://builds.nikolan.net/download/nikolan123_s_TFHoP2-patcher/latest/windows-patcher/Portal-2-The-Final-Hours-Patcher.exe)
 
+Or run the code directly using `python patcher.py`. Zero extra dependencies.
+
 This program patches The Final Hours of Portal 2 to use my custom servers for it instead of the broken original ones.
-My reimplementation is fully open source at [nikolan123/TFHoP2-server](https://github.com/nikolan123/TFHoP2-server) for anyone to host.
+The [patcher](https://github.com/nikolan123/TFHoP2-patcher) and [server](https://github.com/nikolan123/TFHoP2-server) are fully open source. Installation instructions are available in the [blog post](https://nikolan.net/posts/portal2/).
+
+Build locally with `./build.ps1` in PowerShell. The executable is written to `dist`.
 
 Unofficial fan preservation project by Niko. Not affiliated with Valve or the original creators.
