@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import bz2
 import hashlib
 import os
 import shutil
 import struct
+import sys
 import tempfile
 import urllib.error
 import urllib.request
@@ -61,6 +63,37 @@ CONTENT_SWF_NAMES = (
     "TheFinalHoursOfPortal2_10-17.swf",
 )
 ROOT_SWF_NAME = "TheFinalHoursOfPortal2.swf"
+PANORAMA_SWF_NAMES = (
+    "valve_lobby_vr.swf",
+    "valve_room1_vr.swf",
+    "valve_room2_vr.swf",
+)
+URL_SWF_NAMES = (ROOT_SWF_NAME, *CONTENT_SWF_NAMES)
+
+# The tiny BSDIFF files contain only the ActionScript compatibility changes. They are
+# applied to decompressed SWF bodies, so none of the original panorama images are bundled.
+PANORAMA_PATCHES = {
+    ROOT_SWF_NAME: (
+        "panorama-root.bsdiff",
+        "7f7afac3bc8b27745d5d0ca99947f1e14320e187ed9d709a37c7dad67719d04d",
+        "b2db2b7acb8d4b11ad193c13b5a01d5db0659324e5a1caf559c1061c1e534e5f",
+    ),
+    "valve_lobby_vr.swf": (
+        "panorama-lobby.bsdiff",
+        "1cab3016c234d16d1cf5e82da41cae3d124f144d23a17c5059c1a9aac221df74",
+        "4037fa10671cf7e6909b786f6ff567ac78b5910715023a3f84945e9b4d5650b0",
+    ),
+    "valve_room1_vr.swf": (
+        "panorama-room1.bsdiff",
+        "1467e0a2e8183a220f2bcc140fe938554ca445ef34eff4c6bed014e95ceee794",
+        "1a168062178ae59d1ef679af47f91a973eb95fb46703f76556394ef7359421d7",
+    ),
+    "valve_room2_vr.swf": (
+        "panorama-room2.bsdiff",
+        "2adf0ebf1fae760f7cd51360cbec856eef6e718ab61dd7fec2d32cfd138d5188",
+        "266eab0a6c02d1c15ba0cd8a54ccd21e77db0c24c25cc2debecf52f78170e77d",
+    ),
+}
 
 
 class PatcherError(Exception):
@@ -147,7 +180,7 @@ def _backup_path(path: Path) -> Path:
 
 
 def _related_swf_paths(path: Path) -> tuple[Path, ...]:
-    if path.name in CONTENT_SWF_NAMES:
+    if path.name in (*CONTENT_SWF_NAMES, *PANORAMA_SWF_NAMES):
         installation = path.parent.parent.parent
     elif path.name == ROOT_SWF_NAME:
         installation = path.parent
@@ -157,12 +190,11 @@ def _related_swf_paths(path: Path) -> tuple[Path, ...]:
     paths = (
         installation / ROOT_SWF_NAME,
         *(installation / "applicationStorageDirectory" / "swf" / name for name in CONTENT_SWF_NAMES),
+        *(installation / "applicationStorageDirectory" / "swf" / name for name in PANORAMA_SWF_NAMES),
     )
     missing = [candidate.name for candidate in paths if not candidate.is_file()]
     if missing:
-        raise InvalidSwfError(
-            "The ebook installation is incomplete. Missing ebook SWF: " + ", ".join(missing)
-        )
+        raise InvalidSwfError("The ebook installation is incomplete. Missing ebook SWF: " + ", ".join(missing))
     return paths
 
 
@@ -442,6 +474,87 @@ def _encode_swf(compression: str, version: int, body: bytes) -> bytes:
     return header + body
 
 
+def _bsdiff_int(data: bytes, offset: int) -> int:
+    if offset < 0 or offset + 8 > len(data):
+        raise PatcherError("The bundled panorama patch is damaged.")
+    value = data[offset + 7] & 0x7F
+    for index in range(6, -1, -1):
+        value = (value * 256) + data[offset + index]
+    return -value if data[offset + 7] & 0x80 else value
+
+
+def _apply_bsdiff(old: bytes, patch: bytes) -> bytes:
+    if len(patch) < 32 or patch[:8] != b"BSDIFF40":
+        raise PatcherError("The bundled panorama patch is invalid.")
+    control_length = _bsdiff_int(patch, 8)
+    diff_length = _bsdiff_int(patch, 16)
+    new_size = _bsdiff_int(patch, 24)
+    if min(control_length, diff_length, new_size) < 0:
+        raise PatcherError("The bundled panorama patch has invalid lengths.")
+    control_end = 32 + control_length
+    diff_end = control_end + diff_length
+    if diff_end > len(patch):
+        raise PatcherError("The bundled panorama patch is truncated.")
+    try:
+        control = bz2.decompress(patch[32:control_end])
+        diff = bz2.decompress(patch[control_end:diff_end])
+        extra = bz2.decompress(patch[diff_end:])
+    except (OSError, EOFError, ValueError) as exc:
+        raise PatcherError("The bundled panorama patch is damaged.") from exc
+
+    result = bytearray(new_size)
+    old_position = new_position = control_position = diff_position = extra_position = 0
+    while new_position < new_size:
+        if control_position + 24 > len(control):
+            raise PatcherError("The bundled panorama patch control data is truncated.")
+        add_length = _bsdiff_int(control, control_position)
+        copy_length = _bsdiff_int(control, control_position + 8)
+        seek = _bsdiff_int(control, control_position + 16)
+        control_position += 24
+        if add_length < 0 or copy_length < 0 or new_position + add_length + copy_length > new_size:
+            raise PatcherError("The bundled panorama patch contains invalid instructions.")
+        if diff_position + add_length > len(diff) or extra_position + copy_length > len(extra):
+            raise PatcherError("The bundled panorama patch data is truncated.")
+        for index in range(add_length):
+            old_index = old_position + index
+            old_value = old[old_index] if 0 <= old_index < len(old) else 0
+            result[new_position + index] = (diff[diff_position + index] + old_value) & 0xFF
+        new_position += add_length
+        old_position += add_length
+        diff_position += add_length
+        result[new_position : new_position + copy_length] = extra[extra_position : extra_position + copy_length]
+        new_position += copy_length
+        extra_position += copy_length
+        old_position += seek
+    return bytes(result)
+
+
+def _asset_path(name: str) -> Path:
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return base / "assets" / name
+
+
+def _apply_panorama_patch(path: Path, data: bytes) -> bytes:
+    patch_info = PANORAMA_PATCHES.get(path.name)
+    if patch_info is None:
+        return data
+    patch_name, original_hash, patched_hash = patch_info
+    compression, version, body = _decode_swf(data)
+    body_hash = _sha256(body)
+    if body_hash == patched_hash:
+        return data
+    if body_hash != original_hash:
+        raise InvalidSwfError(f"{path.name} is not the supported original ebook version required for the panorama fix.")
+    try:
+        patch_data = _asset_path(patch_name).read_bytes()
+    except (FileNotFoundError, OSError) as exc:
+        raise PatcherError(f"The bundled panorama patch is missing: {patch_name}") from exc
+    patched_body = _apply_bsdiff(body, patch_data)
+    if _sha256(patched_body) != patched_hash:
+        raise PatcherError(f"Panorama compatibility verification failed for {path.name}.")
+    return _encode_swf(compression, version, patched_body)
+
+
 def _analyze(data: bytes) -> _Analysis:
     compression, version, body = _decode_swf(data)
     strings = _all_strings(body)
@@ -486,7 +599,9 @@ def inspect_swf(path) -> InspectionResult:
     swf_path = Path(path).expanduser().resolve()
     paths = _related_swf_paths(swf_path)
     data_by_path = {candidate: _read_file(candidate) for candidate in paths}
-    analyses = {candidate: _analyze(data) for candidate, data in data_by_path.items()}
+    analyses = {
+        candidate: _analyze(data) for candidate, data in data_by_path.items() if candidate.name in URL_SWF_NAMES
+    }
     target_count = sum(len(analysis.target_urls) for analysis in analyses.values())
     legacy_count = sum(analysis.legacy_url_count for analysis in analyses.values())
     if legacy_count == target_count:
@@ -497,15 +612,21 @@ def inspect_swf(path) -> InspectionResult:
         state = "mixed"
     backup_paths = tuple(_backup_path(candidate) for candidate in paths)
     existing_backups = [backup for backup in backup_paths if backup.is_file()]
-    for backup in existing_backups:
-        _validate_backup(backup)
-    selected_analysis = analyses[swf_path]
+    for candidate, backup in zip(paths, backup_paths):
+        if backup.is_file():
+            _validate_backup(backup, candidate)
+    selected_analysis = analyses.get(swf_path)
+    if selected_analysis is None:
+        compression, version, _ = _decode_swf(data_by_path[swf_path])
+    else:
+        compression = selected_analysis.compression
+        version = selected_analysis.version
     servers = tuple(sorted({server for analysis in analyses.values() for server in analysis.servers}))
     return InspectionResult(
         path=swf_path,
         state=state,
-        compression=selected_analysis.compression,
-        version=selected_analysis.version,
+        compression=compression,
+        version=version,
         target_url_count=target_count,
         legacy_url_count=legacy_count,
         servers=servers,
@@ -527,20 +648,31 @@ def probe_server(server_url, timeout=2.0) -> ServerStatus:
         return ServerStatus(normalized, False, str(getattr(exc, "reason", exc)))
 
 
-def _validate_backup(path: Path) -> bytes:
+def _validate_original_data(path: Path, data: bytes) -> None:
+    patch_info = PANORAMA_PATCHES.get(path.name)
+    if patch_info is not None:
+        _, original_hash, _ = patch_info
+        _, _, body = _decode_swf(data)
+        if _sha256(body) != original_hash:
+            raise PatcherError(f"The existing backup for {path.name} is not the supported original.")
+    if path.name in URL_SWF_NAMES:
+        analysis = _analyze(data)
+        if analysis.legacy_url_count != len(analysis.target_urls):
+            raise PatcherError(f"The existing backup for {path.name} is not unpatched.")
+
+
+def _validate_backup(path: Path, target: Path) -> bytes:
     if not path.is_file():
         raise MissingBackupError("No original SWF backup was found.")
     data = _read_file(path)
-    analysis = _analyze(data)
-    if analysis.legacy_url_count != len(analysis.target_urls):
-        raise PatcherError("The existing backup is not an unpatched original SWF.")
+    _validate_original_data(target, data)
     return data
 
 
 def _create_backup(path: Path, data: bytes) -> Path:
     backup = _backup_path(path)
     if backup.exists():
-        _validate_backup(backup)
+        _validate_backup(backup, path)
         return backup
     created = False
     try:
@@ -550,7 +682,7 @@ def _create_backup(path: Path, data: bytes) -> Path:
             handle.flush()
             os.fsync(handle.fileno())
     except FileExistsError:
-        _validate_backup(backup)
+        _validate_backup(backup, path)
     except PermissionError as exc:
         if created:
             try:
@@ -574,7 +706,11 @@ def _atomic_replace(path: Path, data: bytes, verify) -> None:
     temporary: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
-            mode="wb", prefix=f".{path.stem}.", suffix=".tmp", dir=path.parent, delete=False
+            mode="wb",
+            prefix=f".{path.stem}.",
+            suffix=".tmp",
+            dir=path.parent,
+            delete=False,
         ) as handle:
             temporary = Path(handle.name)
             handle.write(data)
@@ -605,39 +741,43 @@ def patch_swf(path, server_url) -> PatchResult:
     swf_path = Path(path).expanduser().resolve()
     paths = _related_swf_paths(swf_path)
     server = normalize_server_url(server_url)
-    original_data = {candidate: _read_file(candidate) for candidate in paths}
-    before = {candidate: _analyze(data) for candidate, data in original_data.items()}
-    before_hash = _sha256(original_data[swf_path])
+    current_data = {candidate: _read_file(candidate) for candidate in paths}
+    before_hash = _sha256(current_data[swf_path])
 
     backups: dict[Path, Path] = {}
+    backup_data: dict[Path, bytes] = {}
     for candidate in paths:
         backup = _backup_path(candidate)
         if backup.exists():
-            _validate_backup(backup)
-        elif before[candidate].legacy_url_count != len(before[candidate].target_urls):
-            raise PatcherError("This SWF set is already patched and its original backup is missing.")
+            original = _validate_backup(backup, candidate)
         else:
-            backup = _create_backup(candidate, original_data[candidate])
+            try:
+                _validate_original_data(candidate, current_data[candidate])
+            except PatcherError as exc:
+                raise PatcherError(f"{candidate.name} is already modified and its original backup is missing.") from exc
+            original = current_data[candidate]
+            backup = _create_backup(candidate, original)
         backups[candidate] = backup
+        backup_data[candidate] = original
 
     output_data: dict[Path, bytes] = {}
     output_hashes: dict[Path, str] = {}
     changed = 0
     for candidate in paths:
-        analysis = before[candidate]
-        rewritten_body, file_changes = _rewrite_body(
-            _decode_swf(original_data[candidate])[2], server
-        )
-        result = _encode_swf(analysis.compression, analysis.version, rewritten_body)
-        after = _analyze(result)
-        if any(_rewrite_url(value, server) != value for value in after.target_urls):
-            raise PatcherError(
-                f"Patched SWF verification failed for {candidate.name}: not every dependency was rewritten."
-            )
-        if len(after.target_urls) != len(analysis.target_urls):
-            raise PatcherError(
-                f"Patched SWF verification failed for {candidate.name}: dependency count changed."
-            )
+        result = _apply_panorama_patch(candidate, backup_data[candidate])
+        file_changes = 0
+        if candidate.name in URL_SWF_NAMES:
+            analysis = _analyze(backup_data[candidate])
+            compression, version, body = _decode_swf(result)
+            rewritten_body, file_changes = _rewrite_body(body, server)
+            result = _encode_swf(compression, version, rewritten_body)
+            after = _analyze(result)
+            if any(_rewrite_url(value, server) != value for value in after.target_urls):
+                raise PatcherError(
+                    f"Patched SWF verification failed for {candidate.name}: not every dependency was rewritten."
+                )
+            if len(after.target_urls) != len(analysis.target_urls):
+                raise PatcherError(f"Patched SWF verification failed for {candidate.name}: dependency count changed.")
         output_data[candidate] = result
         output_hashes[candidate] = _sha256(result)
         changed += file_changes
@@ -645,21 +785,22 @@ def patch_swf(path, server_url) -> PatchResult:
     replaced: list[Path] = []
     try:
         for candidate in paths:
-            if output_data[candidate] == original_data[candidate]:
+            if output_data[candidate] == current_data[candidate]:
                 continue
             expected_hash = output_hashes[candidate]
 
-            def verify(temp_path: Path, expected_hash=expected_hash):
+            def verify(temp_path: Path, expected_hash=expected_hash, candidate=candidate):
                 temp_data = _read_file(temp_path)
-                temp_analysis = _analyze(temp_data)
-                if _sha256(temp_data) != expected_hash or temp_analysis.legacy_url_count:
+                if _sha256(temp_data) != expected_hash:
                     raise PatcherError("The temporary patched SWF failed verification.")
+                if candidate.name in URL_SWF_NAMES and _analyze(temp_data).legacy_url_count:
+                    raise PatcherError("The temporary patched SWF still contains retired URLs.")
 
             _atomic_replace(candidate, output_data[candidate], verify)
             replaced.append(candidate)
     except PatcherError:
         for candidate in reversed(replaced):
-            rollback_data = original_data[candidate]
+            rollback_data = current_data[candidate]
             rollback_hash = _sha256(rollback_data)
 
             def verify_rollback(temp_path: Path, rollback_hash=rollback_hash):
@@ -679,10 +820,8 @@ def patch_swf(path, server_url) -> PatchResult:
         after_sha256=after_hash,
         backup_path=backups[swf_path],
         message=(
-            f"Patched {changed} online dependencies to {server}."
-            if changed
-            else f"All {len(paths)} ebook SWFs already point to {server} "
-            f"({sum(len(item.target_urls) for item in before.values())} dependencies verified)."
+            f"Patched {changed} online dependencies to {server} and applied the Windows compatibility fix "
+            "to all 3 panoramas."
         ),
     )
 
@@ -691,7 +830,7 @@ def restore_swf(path) -> RestoreResult:
     swf_path = Path(path).expanduser().resolve()
     paths = _related_swf_paths(swf_path)
     backups = {candidate: _backup_path(candidate) for candidate in paths}
-    backup_data = {candidate: _validate_backup(backup) for candidate, backup in backups.items()}
+    backup_data = {candidate: _validate_backup(backup, candidate) for candidate, backup in backups.items()}
     current_data = {candidate: _read_file(candidate) for candidate in paths}
     before_hash = _sha256(current_data[swf_path])
     backup_hashes = {candidate: _sha256(data) for candidate, data in backup_data.items()}
@@ -701,14 +840,11 @@ def restore_swf(path) -> RestoreResult:
         for candidate in paths:
             expected_hash = backup_hashes[candidate]
 
-            def verify(temp_path: Path, expected_hash=expected_hash):
+            def verify(temp_path: Path, expected_hash=expected_hash, candidate=candidate):
                 temp_data = _read_file(temp_path)
-                temp_analysis = _analyze(temp_data)
-                if (
-                    _sha256(temp_data) != expected_hash
-                    or temp_analysis.legacy_url_count != len(temp_analysis.target_urls)
-                ):
+                if _sha256(temp_data) != expected_hash:
                     raise PatcherError("The temporary restored SWF failed verification.")
+                _validate_original_data(candidate, temp_data)
 
             _atomic_replace(candidate, backup_data[candidate], verify)
             restored.append(candidate)
@@ -740,3 +876,6 @@ def restore_swf(path) -> RestoreResult:
         after_sha256=backup_hashes[swf_path],
         message="Original SWFs restored. Backups removed.",
     )
+
+if __name__ == "__main__":
+    print("Wrong one. Run the other file.")
