@@ -97,6 +97,8 @@ class Patcher(tk.Tk):
         self.server = tk.StringVar(value="https://TFHoP2.nikolan.net")
         self.status = tk.StringVar(value="Checking installation...")
         self.accept_risk = tk.BooleanVar(value=False)
+        self.fix_online_services = tk.BooleanVar(value=True)
+        self.fix_panoramas = tk.BooleanVar(value=True)
         self._busy = False
         self._inspection = None
         self._check_after = None
@@ -192,6 +194,41 @@ class Patcher(tk.Tk):
         self.server_entry = self._entry(body, self.server, 4)
         self.server_entry.grid(row=4, column=0, columnspan=2, sticky="ew", ipady=6)
 
+        self._label(body, "PATCHES", 5, top=11)
+        patch_list = tk.Frame(
+            body,
+            bg=PANEL,
+            highlightbackground=BORDER,
+            highlightthickness=1,
+        )
+        patch_list.grid(row=6, column=0, columnspan=2, sticky="ew")
+        self.patch_checkboxes = []
+        for text, variable in (
+            ("Fix online services", self.fix_online_services),
+            ("Fix panoramas", self.fix_panoramas),
+        ):
+            checkbox = tk.Checkbutton(
+                patch_list,
+                text=text,
+                variable=variable,
+                command=self._update_patch_state,
+                anchor="w",
+                bg=PANEL,
+                activebackground=PANEL,
+                fg=TEXT,
+                activeforeground=TEXT,
+                selectcolor=FIELD,
+                font=("Segoe UI", 9),
+                bd=0,
+                highlightthickness=0,
+                padx=8,
+                pady=3,
+            )
+            checkbox.pack(fill="x")
+            self.patch_checkboxes.append(checkbox)
+
+        self._label(body, "DISCLAIMER", 7, top=11)
+
         disclaimer = tk.Label(
             body,
             text=(
@@ -209,7 +246,7 @@ class Patcher(tk.Tk):
             highlightbackground=BORDER,
             highlightthickness=1,
         )
-        disclaimer.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(11, 8))
+        disclaimer.grid(row=8, column=0, columnspan=2, sticky="ew", pady=(0, 8))
 
         self.risk_checkbox = tk.Checkbutton(
             body,
@@ -228,7 +265,7 @@ class Patcher(tk.Tk):
             bd=0,
             highlightthickness=0,
         )
-        self.risk_checkbox.grid(row=6, column=0, columnspan=2, sticky="w", pady=(0, 7))
+        self.risk_checkbox.grid(row=9, column=0, columnspan=2, sticky="w", pady=(0, 7))
 
         self.status_label = tk.Label(
             body,
@@ -236,14 +273,15 @@ class Patcher(tk.Tk):
             anchor="w",
             justify="left",
             wraplength=492,
+            height=2,
             bg=BG,
             fg=MUTED,
             font=("Segoe UI", 8),
         )
-        self.status_label.grid(row=7, column=0, columnspan=2, sticky="w", pady=(0, 9))
+        self.status_label.grid(row=10, column=0, columnspan=2, sticky="w", pady=(0, 9))
 
         actions = tk.Frame(body, bg=BG)
-        actions.grid(row=8, column=0, columnspan=2, sticky="ew")
+        actions.grid(row=11, column=0, columnspan=2, sticky="ew")
         self.restore_button = SteamButton(actions, "Restore", self.restore)
         self.restore_button.pack(side="left")
         self.patch_button = SteamButton(actions, "Patch", self.patch, primary=True)
@@ -353,7 +391,10 @@ class Patcher(tk.Tk):
 
     def _update_action_state(self):
         valid = self._inspection is not None
-        self.patch_button.set_enabled(valid and self.accept_risk.get() and not self._busy)
+        has_patch = self.fix_online_services.get() or self.fix_panoramas.get()
+        self.patch_button.set_enabled(
+            valid and has_patch and self.accept_risk.get() and not self._busy
+        )
         self.restore_button.set_enabled(
             valid and self._inspection.backup_exists and not self._busy
         )
@@ -364,11 +405,21 @@ class Patcher(tk.Tk):
         self.swf_entry.configure(state=state)
         self.server_entry.configure(state=state)
         self.risk_checkbox.configure(state=state)
+        for checkbox in self.patch_checkboxes:
+            checkbox.configure(state=state)
         self.browse_button.set_enabled(not busy)
         self._update_action_state()
 
     def patch(self):
         if self._busy or self._inspection is None or not self.accept_risk.get():
+            return
+        fix_online_services = self.fix_online_services.get()
+        fix_panoramas = self.fix_panoramas.get()
+        if not fix_online_services and not fix_panoramas:
+            return
+        if not fix_online_services:
+            self._set_busy(True)
+            self._start_patch(self.server.get(), fix_online_services, fix_panoramas)
             return
         try:
             server = normalize_server_url(self.server.get())
@@ -399,11 +450,32 @@ class Patcher(tk.Tk):
                 self.status.set("Patching cancelled. No files were changed.")
                 self.status_label.configure(fg=ORANGE)
                 return
-        self.status.set("Creating original backups and patching all ebook SWFs...")
+        self._start_patch(
+            server_status.url,
+            self.fix_online_services.get(),
+            self.fix_panoramas.get(),
+        )
+
+    def _start_patch(self, server, fix_online_services, fix_panoramas):
+        self.status.set("Starting selected patches...")
         swf_path = self.swf.get().strip()
         self._run_operation(
-            lambda: patch_swf(swf_path, server_status.url)
+            lambda: patch_swf(
+                swf_path,
+                server,
+                fix_online_services=fix_online_services,
+                fix_panoramas=fix_panoramas,
+                progress=self._queue_progress,
+            )
         )
+
+    def _queue_progress(self, message):
+        self.after(0, lambda: self._show_progress(message))
+
+    def _show_progress(self, message):
+        if self._busy:
+            self.status.set(message)
+            self.status_label.configure(fg=MUTED)
 
     def restore(self):
         if self._busy or self._inspection is None or not self._inspection.backup_exists:
@@ -412,7 +484,7 @@ class Patcher(tk.Tk):
         self.status.set("Restoring the original SWF...")
         self.status_label.configure(fg=MUTED)
         swf_path = self.swf.get().strip()
-        self._run_operation(lambda: restore_swf(swf_path))
+        self._run_operation(lambda: restore_swf(swf_path, progress=self._queue_progress))
 
     def _run_operation(self, operation):
         def worker():
